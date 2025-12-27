@@ -221,15 +221,14 @@ def setup_global_telemetry():
     default_logger_provider = get_logger_provider_for_site("frappe-web")
     set_logger_provider(default_logger_provider)
 
-    # Create OTEL logging handler
+    # Create OTEL logging handler - INFO level and above only
     _otel_handler = LoggingHandler(level=logging.INFO, logger_provider=default_logger_provider)
 
-    # Add OTEL handler to loggers
+    # Add OTEL handler to loggers - set INFO level to avoid debug spam
     for logger_name in [None, "frappe", "gunicorn.error", "gunicorn.access", "werkzeug"]:
         logger = logging.getLogger(logger_name)
         logger.addHandler(_otel_handler)
-        if logger_name is None:
-            logger.setLevel(logging.INFO)
+        logger.setLevel(logging.INFO)  # INFO and above only
 
     # === INSTRUMENTATION ===
     RequestsInstrumentor().instrument()
