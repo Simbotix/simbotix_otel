@@ -3,11 +3,12 @@ OpenTelemetry WSGI Application Wrapper for Frappe
 
 This module wraps the Frappe WSGI application with OpenTelemetry instrumentation
 to collect traces, metrics, and logs with per-site service names.
+
+Uses frappe.local.site for proper site detection.
 """
 
 import os
 import logging
-import sys
 
 # OpenTelemetry imports
 from opentelemetry import trace, metrics
@@ -42,7 +43,6 @@ def get_otel_config():
     return {
         "endpoint": os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otel.appz.studio"),
         "headers": os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
-        "service_name": os.environ.get("OTEL_SERVICE_NAME", "frappe"),
         "service_version": os.environ.get("OTEL_SERVICE_VERSION", "15.91.0"),
         "environment": os.environ.get("OTEL_DEPLOYMENT_ENVIRONMENT", "production"),
     }
@@ -67,6 +67,7 @@ _tracer_providers = {}
 _logger_providers = {}
 _meter_provider = None
 _otel_handler = None
+_sites_directory = None
 
 
 def get_config():
@@ -77,13 +78,51 @@ def get_config():
     return _config, _headers
 
 
-def get_site_from_host(host):
-    """Extract site name from host header."""
+def get_sites_directory():
+    """Get the Frappe sites directory."""
+    global _sites_directory
+    if _sites_directory is None:
+        # Standard Frappe bench structure
+        bench_path = os.environ.get("FRAPPE_BENCH_ROOT", "/home/frappe/frappe-bench")
+        _sites_directory = os.path.join(bench_path, "sites")
+    return _sites_directory
+
+
+def is_valid_site(site_name):
+    """Check if a site exists in the sites directory."""
+    if not site_name or site_name == "unknown":
+        return False
+    sites_dir = get_sites_directory()
+    site_path = os.path.join(sites_dir, site_name)
+    return os.path.isdir(site_path) and os.path.exists(os.path.join(site_path, "site_config.json"))
+
+
+def get_site_from_request(environ):
+    """
+    Extract site name from the request environment.
+    This mimics Frappe's site detection logic.
+    """
+    # Try to get from frappe.local.site if Frappe is initialized
+    try:
+        import frappe
+        if hasattr(frappe, 'local') and hasattr(frappe.local, 'site') and frappe.local.site:
+            return frappe.local.site
+    except (ImportError, AttributeError):
+        pass
+
+    # Fall back to HTTP_HOST parsing (same as Frappe does)
+    host = environ.get("HTTP_HOST", "")
     if not host:
-        return "unknown"
+        host = environ.get("SERVER_NAME", "unknown")
+
     # Remove port if present
-    site = host.split(":")[0]
-    return site
+    site_name = host.split(":")[0]
+
+    # Validate against sites directory
+    if is_valid_site(site_name):
+        return site_name
+
+    return "frappe-web"  # Default fallback
 
 
 def get_tracer_provider_for_site(site_name):
@@ -202,7 +241,10 @@ def setup_global_telemetry():
 
 class SiteAwareOTelMiddleware:
     """
-    Custom WSGI middleware that sets the service name based on the request host.
+    Custom WSGI middleware that sets the service name based on the Frappe site.
+
+    Uses frappe.local.site when available, falls back to HTTP_HOST with
+    validation against the sites directory.
     """
 
     def __init__(self, app):
@@ -220,14 +262,13 @@ class SiteAwareOTelMiddleware:
         return self._wsgi_middlewares[site_name]
 
     def __call__(self, environ, start_response):
-        # Extract site from HTTP_HOST
-        host = environ.get("HTTP_HOST", "")
-        site_name = get_site_from_host(host)
+        # Get site from request (validates against sites directory)
+        site_name = get_site_from_request(environ)
 
         # Get site-specific middleware
         middleware = self._get_middleware_for_site(site_name)
 
-        # Add site to environ for Frappe to use
+        # Add site to environ for downstream use
         environ["OTEL_SITE_NAME"] = site_name
 
         return middleware(environ, start_response)
