@@ -1,0 +1,29 @@
+[project]
+name = "simbotix_otel"
+version = "0.1.0"
+description = "OpenTelemetry instrumentation for Frappe/ERPNext - sends traces, metrics, and logs to ClickStack/HyperDX"
+authors = [
+    {name = "Rajesh Medampudi", email = "rajesh@simbotix.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "opentelemetry-api>=1.21.0",
+    "opentelemetry-sdk>=1.21.0",
+    "opentelemetry-exporter-otlp>=1.21.0",
+    "opentelemetry-instrumentation>=0.42b0",
+    "opentelemetry-instrumentation-wsgi>=0.42b0",
+    "opentelemetry-instrumentation-requests>=0.42b0",
+    "opentelemetry-instrumentation-redis>=0.42b0",
+    "opentelemetry-instrumentation-pymysql>=0.42b0",
+    "opentelemetry-instrumentation-logging>=0.42b0",
+]
+
+[build-system]
+requires = ["flit_core>=3.4"]
+build-backend = "flit_core.buildapi"
+
+[tool.flit.module]
+name = "simbotix_otel"
