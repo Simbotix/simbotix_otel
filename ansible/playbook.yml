@@ -1,0 +1,215 @@
+---
+# Ansible Playbook: Frappe OpenTelemetry Observability Setup
+#
+# This playbook sets up complete observability for Frappe servers:
+# - Installs simbotix_otel app for traces and application logs
+# - Installs FluentBit for file log collection
+# - Configures both to send to ClickStack/HyperDX
+#
+# Usage:
+#   ansible-playbook -i inventory.yml playbook.yml
+#
+# Requirements:
+#   - Target server must have Frappe bench installed
+#   - SSH access with sudo privileges
+
+- name: Setup Frappe OpenTelemetry Observability
+  hosts: frappe_servers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # Default values (can be overridden in inventory)
+    otel_endpoint: "{{ otel_endpoint | default('https://otel.appz.studio') }}"
+    otel_api_key: "{{ otel_api_key | default('') }}"
+    otel_environment: "{{ otel_environment | default('production') }}"
+    bench_path: "{{ bench_path | default('/home/frappe/frappe-bench') }}"
+    bench_user: "{{ bench_user | default('frappe') }}"
+    server_name: "{{ server_name | default(ansible_hostname) }}"
+
+  tasks:
+    # =========================================
+    # GATHER SERVER INFORMATION
+    # =========================================
+    - name: Get server public IP
+      uri:
+        url: https://api.ipify.org?format=json
+        return_content: yes
+      register: public_ip_result
+      ignore_errors: yes
+
+    - name: Set server identification facts
+      set_fact:
+        server_public_ip: "{{ (public_ip_result.json.ip | default(ansible_default_ipv4.address)) }}"
+        server_hostname: "{{ ansible_hostname }}"
+        server_fqdn: "{{ ansible_fqdn }}"
+
+    - name: Display server information
+      debug:
+        msg: |
+          Server: {{ server_name }}
+          Hostname: {{ server_hostname }}
+          Public IP: {{ server_public_ip }}
+          Bench Path: {{ bench_path }}
+
+    # =========================================
+    # DISCOVER FRAPPE SITES
+    # =========================================
+    - name: Find all Frappe sites
+      find:
+        paths: "{{ bench_path }}/sites"
+        file_type: directory
+        excludes:
+          - assets
+          - apps.txt
+          - common_site_config.json
+      register: site_dirs
+
+    - name: Filter valid sites (with site_config.json)
+      stat:
+        path: "{{ item.path }}/site_config.json"
+      loop: "{{ site_dirs.files }}"
+      register: site_configs
+
+    - name: Set list of valid sites
+      set_fact:
+        frappe_sites: "{{ site_configs.results | selectattr('stat.exists', 'equalto', true) | map(attribute='item.path') | map('basename') | list }}"
+
+    - name: Display discovered sites
+      debug:
+        msg: "Discovered sites: {{ frappe_sites }}"
+
+    # =========================================
+    # INSTALL OPENTELEMETRY DEPENDENCIES
+    # =========================================
+    - name: Install OpenTelemetry Python packages
+      become_user: "{{ bench_user }}"
+      pip:
+        name:
+          - opentelemetry-api>=1.21.0
+          - opentelemetry-sdk>=1.21.0
+          - opentelemetry-exporter-otlp>=1.21.0
+          - opentelemetry-instrumentation>=0.42b0
+          - opentelemetry-instrumentation-wsgi>=0.42b0
+          - opentelemetry-instrumentation-requests>=0.42b0
+          - opentelemetry-instrumentation-redis>=0.42b0
+          - opentelemetry-instrumentation-pymysql>=0.42b0
+          - opentelemetry-instrumentation-logging>=0.42b0
+        executable: "{{ bench_path }}/env/bin/pip"
+        state: present
+
+    # =========================================
+    # INSTALL SIMBOTIX_OTEL APP
+    # =========================================
+    - name: Check if simbotix_otel app exists
+      stat:
+        path: "{{ bench_path }}/apps/simbotix_otel"
+      register: simbotix_otel_dir
+
+    - name: Clone simbotix_otel app
+      become_user: "{{ bench_user }}"
+      git:
+        repo: "{{ simbotix_otel_repo }}"
+        dest: "{{ bench_path }}/apps/simbotix_otel"
+        version: main
+        force: yes
+      when: not simbotix_otel_dir.stat.exists
+
+    - name: Update simbotix_otel app
+      become_user: "{{ bench_user }}"
+      git:
+        repo: "{{ simbotix_otel_repo }}"
+        dest: "{{ bench_path }}/apps/simbotix_otel"
+        version: main
+        update: yes
+      when: simbotix_otel_dir.stat.exists
+
+    # =========================================
+    # CONFIGURE SUPERVISOR
+    # =========================================
+    - name: Find supervisor config file
+      find:
+        paths:
+          - /etc/supervisor/conf.d
+          - /etc/supervisord.d
+        patterns: "*frappe*.conf"
+      register: supervisor_configs
+
+    - name: Set supervisor config path
+      set_fact:
+        supervisor_conf: "{{ supervisor_configs.files[0].path }}"
+      when: supervisor_configs.files | length > 0
+
+    - name: Backup supervisor config
+      copy:
+        src: "{{ supervisor_conf }}"
+        dest: "{{ supervisor_conf }}.bak.{{ ansible_date_time.epoch }}"
+        remote_src: yes
+      when: supervisor_conf is defined
+
+    - name: Update gunicorn to use simbotix_otel.app
+      replace:
+        path: "{{ supervisor_conf }}"
+        regexp: 'frappe\.app:application'
+        replace: 'simbotix_otel.app:application'
+      when: supervisor_conf is defined
+      notify: Restart frappe web
+
+    - name: Check if OTEL environment vars exist
+      command: grep -q "OTEL_EXPORTER_OTLP_ENDPOINT" "{{ supervisor_conf }}"
+      register: otel_vars_check
+      failed_when: false
+      changed_when: false
+      when: supervisor_conf is defined
+
+    - name: Add OTEL environment variables to supervisor
+      lineinfile:
+        path: "{{ supervisor_conf }}"
+        insertafter: '\[program:.*frappe-web\]'
+        line: 'environment=OTEL_EXPORTER_OTLP_ENDPOINT="{{ otel_endpoint }}",OTEL_EXPORTER_OTLP_HEADERS="authorization={{ otel_api_key }}",OTEL_SERVICE_NAME="frappe-{{ server_name }}",OTEL_DEPLOYMENT_ENVIRONMENT="{{ otel_environment }}",OTEL_SERVER_IP="{{ server_public_ip }}",PYTHONPATH="{{ bench_path }}/apps/simbotix_otel"'
+      when:
+        - supervisor_conf is defined
+        - otel_vars_check.rc != 0
+      notify: Restart frappe web
+
+    # =========================================
+    # INSTALL FLUENT BIT
+    # =========================================
+    - name: Check if FluentBit is installed
+      command: which fluent-bit
+      register: fluentbit_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install FluentBit
+      shell: curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh
+      when: fluentbit_check.rc != 0
+
+    - name: Create FluentBit configuration
+      template:
+        src: fluent-bit.conf.j2
+        dest: /etc/fluent-bit/fluent-bit.conf
+        mode: '0644'
+      notify: Restart fluent-bit
+
+    - name: Enable and start FluentBit
+      systemd:
+        name: fluent-bit
+        enabled: yes
+        state: started
+
+  # =========================================
+  # HANDLERS
+  # =========================================
+  handlers:
+    - name: Restart frappe web
+      shell: |
+        supervisorctl reread
+        supervisorctl update
+        supervisorctl restart $(supervisorctl status | grep frappe-web | awk '{print $1}')
+      ignore_errors: yes
+
+    - name: Restart fluent-bit
+      systemd:
+        name: fluent-bit
+        state: restarted

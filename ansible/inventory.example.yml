@@ -1,0 +1,33 @@
+---
+# Example inventory file for Frappe servers
+# Copy this to inventory.yml and customize
+
+all:
+  vars:
+    # OTel Configuration
+    otel_endpoint: "https://otel.appz.studio"
+    otel_api_key: "YOUR_OTEL_API_KEY"
+    otel_environment: "production"
+
+    # Frappe Configuration
+    bench_path: "/home/frappe/frappe-bench"
+    bench_user: "frappe"
+
+    # GitHub repo for simbotix_otel app
+    simbotix_otel_repo: "https://github.com/Simbotix/simbotix_otel.git"
+
+  children:
+    frappe_servers:
+      hosts:
+        # Add your Frappe servers here
+        frappe-prod-1:
+          ansible_host: 151.80.144.12
+          ansible_user: ubuntu
+          server_name: "frappe-prod-ovh"
+          # Optional: override global vars per host
+          # otel_environment: "staging"
+
+        # frappe-prod-2:
+        #   ansible_host: 10.0.0.2
+        #   ansible_user: ubuntu
+        #   server_name: "frappe-prod-hetzner"
