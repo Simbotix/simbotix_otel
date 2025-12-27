@@ -3,17 +3,11 @@ OpenTelemetry WSGI Application Wrapper for Frappe
 
 This module wraps the Frappe WSGI application with OpenTelemetry instrumentation
 to collect traces, metrics, and logs.
-
-Usage:
-    Instead of using frappe.app:application directly, use:
-    simbotix_otel.app:application
-
-    Or run gunicorn with opentelemetry-instrument:
-    opentelemetry-instrument gunicorn ... frappe.app:application
 """
 
 import os
 import logging
+import sys
 
 # OpenTelemetry imports
 from opentelemetry import trace, metrics
@@ -49,7 +43,7 @@ def get_otel_config():
         "endpoint": os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otel.appz.studio"),
         "headers": os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
         "service_name": os.environ.get("OTEL_SERVICE_NAME", "frappe"),
-        "service_version": os.environ.get("OTEL_SERVICE_VERSION", "1.0.0"),
+        "service_version": os.environ.get("OTEL_SERVICE_VERSION", "15.91.0"),
         "environment": os.environ.get("OTEL_DEPLOYMENT_ENVIRONMENT", "production"),
     }
 
@@ -76,7 +70,7 @@ def setup_telemetry():
         SERVICE_NAME: config["service_name"],
         SERVICE_VERSION: config["service_version"],
         DEPLOYMENT_ENVIRONMENT: config["environment"],
-        "host.name": os.environ.get("HOSTNAME", "unknown"),
+        "host.name": os.environ.get("HOSTNAME", os.uname().nodename),
     })
 
     # === TRACES ===
@@ -95,7 +89,7 @@ def setup_telemetry():
     )
     metric_reader = PeriodicExportingMetricReader(
         metric_exporter,
-        export_interval_millis=60000,  # Export every 60 seconds
+        export_interval_millis=30000,  # Export every 30 seconds
     )
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(meter_provider)
@@ -109,9 +103,23 @@ def setup_telemetry():
     logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
     set_logger_provider(logger_provider)
 
-    # Add OTEL handler to Python logging
-    handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
-    logging.getLogger().addHandler(handler)
+    # Create OTEL logging handler
+    otel_handler = LoggingHandler(level=logging.DEBUG, logger_provider=logger_provider)
+
+    # Add OTEL handler to root logger
+    root_logger = logging.getLogger()
+    root_logger.addHandler(otel_handler)
+    root_logger.setLevel(logging.DEBUG)
+
+    # Also add to frappe logger specifically
+    frappe_logger = logging.getLogger("frappe")
+    frappe_logger.addHandler(otel_handler)
+    frappe_logger.setLevel(logging.DEBUG)
+
+    # Add to gunicorn loggers
+    for logger_name in ["gunicorn.error", "gunicorn.access"]:
+        gunicorn_logger = logging.getLogger(logger_name)
+        gunicorn_logger.addHandler(otel_handler)
 
     # === INSTRUMENTATION ===
     # Instrument requests library (for external HTTP calls)
@@ -124,7 +132,7 @@ def setup_telemetry():
     if HAS_PYMYSQL:
         PyMySQLInstrumentor().instrument()
 
-    # Instrument Python logging to capture log records
+    # Instrument Python logging to add trace context
     LoggingInstrumentor().instrument(set_logging_format=True)
 
     return tracer_provider
@@ -148,3 +156,6 @@ get_tracer_provider()
 
 # Wrap with OpenTelemetry WSGI middleware
 application = OpenTelemetryMiddleware(frappe_application)
+
+# Log that telemetry is initialized
+logging.getLogger("simbotix_otel").info("OpenTelemetry instrumentation initialized for Frappe")
